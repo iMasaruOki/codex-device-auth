@@ -23,12 +23,14 @@ node codex-device-auth.js --user-code ABCD-EFGH
 ```bash
 node codex-device-auth.js --user-code ABCD-EFGH --output ~/.config/consoleweb/auth.json
 node codex-device-auth.js --user-code ABCD-EFGH --interval-seconds 3
+node codex-device-auth.js --user-code ABCD-EFGH --max-attempts 20
 node codex-device-auth.js --user-code ABCD-EFGH --device-auth-id your-device-auth-id
 node codex-device-auth.js --json
 ```
 
 - `--user-code` は必須です
 - `--device-auth-id` は取得できている場合だけ渡します
+- `--max-attempts` はポーリング回数の上限です。既定値は 10 回です
 - `--json` は他のツールから扱いやすいJSON出力に切り替えます
 
 ## 出力

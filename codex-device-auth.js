@@ -7,6 +7,7 @@ const DEFAULT_ISSUER = "https://auth.openai.com";
 const DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEFAULT_TIMEOUT_SECONDS = 15 * 60;
 const DEFAULT_POLL_INTERVAL_SECONDS = 5;
+const DEFAULT_MAX_ATTEMPTS = 10;
 
 function parseArgs(argv) {
   const args = {
@@ -18,6 +19,7 @@ function parseArgs(argv) {
     json: false,
     timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
     intervalSeconds: DEFAULT_POLL_INTERVAL_SECONDS,
+    maxAttempts: DEFAULT_MAX_ATTEMPTS,
     help: false,
   };
 
@@ -42,6 +44,11 @@ function parseArgs(argv) {
       args.intervalSeconds = parsePositiveInt(
         requireValue(argv, ++i, "--interval-seconds"),
         "--interval-seconds",
+      );
+    } else if (arg === "--max-attempts") {
+      args.maxAttempts = parsePositiveInt(
+        requireValue(argv, ++i, "--max-attempts"),
+        "--max-attempts",
       );
     } else if (arg === "--json") {
       args.json = true;
@@ -88,6 +95,7 @@ Options:
   --device-auth-id <id>     Optional device auth id if you also captured it
   --timeout-seconds <n>     Poll timeout in seconds (default: ${DEFAULT_TIMEOUT_SECONDS})
   --interval-seconds <n>    Poll interval in seconds (default: ${DEFAULT_POLL_INTERVAL_SECONDS})
+  --max-attempts <n>        Maximum polling attempts before failing (default: ${DEFAULT_MAX_ATTEMPTS})
   --json                    Print machine-readable status messages
   --help, -h                Show this help
 `);
@@ -120,6 +128,7 @@ async function main() {
       args.userCode,
       args.intervalSeconds,
       args.timeoutSeconds,
+      args.maxAttempts,
       args.json,
     );
 
@@ -186,11 +195,14 @@ async function pollForToken(
   userCode,
   intervalSeconds,
   timeoutSeconds,
+  maxAttempts,
   json,
 ) {
   const deadline = Date.now() + timeoutSeconds * 1000;
+  let attempts = 0;
 
   for (;;) {
+    attempts += 1;
     const response = await fetch(`${apiBaseUrl}/deviceauth/token`, {
       method: "POST",
       headers: {
@@ -212,6 +224,10 @@ async function pollForToken(
       throw new Error(
         `deviceauth/token failed with status ${response.status}${body ? `: ${body}` : ""}`,
       );
+    }
+
+    if (attempts >= maxAttempts) {
+      throw new Error(`device auth exceeded max polling attempts (${maxAttempts})`);
     }
 
     if (Date.now() >= deadline) {
