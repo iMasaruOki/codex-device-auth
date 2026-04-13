@@ -6,15 +6,18 @@ const path = require("path");
 const DEFAULT_ISSUER = "https://auth.openai.com";
 const DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEFAULT_TIMEOUT_SECONDS = 15 * 60;
+const DEFAULT_POLL_INTERVAL_SECONDS = 5;
 
 function parseArgs(argv) {
   const args = {
     issuer: DEFAULT_ISSUER,
     clientId: DEFAULT_CLIENT_ID,
     output: path.join(process.cwd(), "auth.json"),
-    pollOnly: false,
+    userCode: "",
+    deviceAuthId: "",
     json: false,
     timeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
+    intervalSeconds: DEFAULT_POLL_INTERVAL_SECONDS,
     help: false,
   };
 
@@ -26,13 +29,20 @@ function parseArgs(argv) {
       args.clientId = requireValue(argv, ++i, "--client-id");
     } else if (arg === "--output") {
       args.output = path.resolve(requireValue(argv, ++i, "--output"));
+    } else if (arg === "--user-code") {
+      args.userCode = requireValue(argv, ++i, "--user-code").trim();
+    } else if (arg === "--device-auth-id") {
+      args.deviceAuthId = requireValue(argv, ++i, "--device-auth-id").trim();
     } else if (arg === "--timeout-seconds") {
       args.timeoutSeconds = parsePositiveInt(
         requireValue(argv, ++i, "--timeout-seconds"),
         "--timeout-seconds",
       );
-    } else if (arg === "--poll-only") {
-      args.pollOnly = true;
+    } else if (arg === "--interval-seconds") {
+      args.intervalSeconds = parsePositiveInt(
+        requireValue(argv, ++i, "--interval-seconds"),
+        "--interval-seconds",
+      );
     } else if (arg === "--json") {
       args.json = true;
     } else if (arg === "--help" || arg === "-h") {
@@ -40,6 +50,10 @@ function parseArgs(argv) {
     } else {
       throw new Error(`unknown option: ${arg}`);
     }
+  }
+
+  if (!args.help && !args.userCode) {
+    throw new Error("--user-code is required");
   }
 
   return args;
@@ -70,8 +84,10 @@ Options:
   --output <path>           Where to save the token JSON (default: ./auth.json)
   --issuer <url>            Auth issuer (default: ${DEFAULT_ISSUER})
   --client-id <id>          OAuth client id (default: ${DEFAULT_CLIENT_ID})
+  --user-code <code>        One-time code shown by the Codex CLI
+  --device-auth-id <id>     Optional device auth id if you also captured it
   --timeout-seconds <n>     Poll timeout in seconds (default: ${DEFAULT_TIMEOUT_SECONDS})
-  --poll-only               Stop after printing verification URL and code
+  --interval-seconds <n>    Poll interval in seconds (default: ${DEFAULT_POLL_INTERVAL_SECONDS})
   --json                    Print machine-readable status messages
   --help, -h                Show this help
 `);
@@ -96,19 +112,13 @@ async function main() {
   try {
     const baseUrl = args.issuer.replace(/\/+$/, "");
     const apiBaseUrl = `${baseUrl}/api/accounts`;
-    const deviceCode = await requestUserCode(apiBaseUrl, args.clientId);
-
-    printInstructions(baseUrl, deviceCode, args.json);
-
-    if (args.pollOnly) {
-      return;
-    }
+    printInstructions(baseUrl, args.userCode, args.deviceAuthId, args.json);
 
     const tokenCode = await pollForToken(
       apiBaseUrl,
-      deviceCode.device_auth_id,
-      deviceCode.user_code,
-      deviceCode.interval,
+      args.deviceAuthId,
+      args.userCode,
+      args.intervalSeconds,
       args.timeoutSeconds,
       args.json,
     );
@@ -124,11 +134,14 @@ async function main() {
       issuer: baseUrl,
       client_id: args.clientId,
       verification_url: `${baseUrl}/codex/device`,
-      user_code: deviceCode.user_code,
-      device_auth_id: deviceCode.device_auth_id,
+      user_code: args.userCode,
       created_at: new Date().toISOString(),
       tokens,
     };
+
+    if (args.deviceAuthId) {
+      output.device_auth_id = args.deviceAuthId;
+    }
 
     saveOutput(args.output, output);
 
@@ -167,27 +180,6 @@ async function main() {
   }
 }
 
-async function requestUserCode(apiBaseUrl, clientId) {
-  const response = await postJson(`${apiBaseUrl}/deviceauth/usercode`, {
-    client_id: clientId,
-  });
-
-  const interval = parsePositiveInt(
-    String(response.interval || "5").trim(),
-    "deviceauth interval",
-  );
-
-  if (!response.device_auth_id || !response.user_code) {
-    throw new Error("deviceauth/usercode response did not include required fields");
-  }
-
-  return {
-    device_auth_id: response.device_auth_id,
-    user_code: response.user_code,
-    interval,
-  };
-}
-
 async function pollForToken(
   apiBaseUrl,
   deviceAuthId,
@@ -204,10 +196,7 @@ async function pollForToken(
       headers: {
         "content-type": "application/json",
       },
-      body: JSON.stringify({
-        device_auth_id: deviceAuthId,
-        user_code: userCode,
-      }),
+      body: JSON.stringify(buildTokenRequestBody(deviceAuthId, userCode)),
     });
 
     if (response.ok) {
@@ -237,6 +226,18 @@ async function pollForToken(
   }
 }
 
+function buildTokenRequestBody(deviceAuthId, userCode) {
+  const body = {
+    user_code: userCode,
+  };
+
+  if (deviceAuthId) {
+    body.device_auth_id = deviceAuthId;
+  }
+
+  return body;
+}
+
 async function exchangeCodeForTokens(baseUrl, clientId, authorizationCode, codeVerifier) {
   const response = await fetch(`${baseUrl}/oauth/token`, {
     method: "POST",
@@ -260,23 +261,6 @@ async function exchangeCodeForTokens(baseUrl, clientId, authorizationCode, codeV
   return response.json();
 }
 
-async function postJson(url, payload) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    const body = await safeReadBody(response);
-    throw new Error(`request failed for ${url} with status ${response.status}${body ? `: ${body}` : ""}`);
-  }
-
-  return response.json();
-}
-
 async function safeReadBody(response) {
   try {
     return (await response.text()).trim();
@@ -293,32 +277,31 @@ function saveOutput(outputPath, output) {
   fs.chmodSync(outputPath, 0o600);
 }
 
-function printInstructions(baseUrl, deviceCode, json) {
+function printInstructions(baseUrl, userCode, deviceAuthId, json) {
   const verificationUrl = `${baseUrl}/codex/device`;
   if (json) {
-    console.log(
-      JSON.stringify(
-        {
-          status: "pending",
-          verification_url: verificationUrl,
-          user_code: deviceCode.user_code,
-          interval: deviceCode.interval,
-        },
-        null,
-        2,
-      ),
-    );
+    const output = {
+      status: "pending",
+      verification_url: verificationUrl,
+      user_code: userCode,
+    };
+    if (deviceAuthId) {
+      output.device_auth_id = deviceAuthId;
+    }
+    console.log(JSON.stringify(output, null, 2));
     return;
   }
 
   console.log("");
   console.log("OpenAI Codex device authentication");
   console.log("");
-  console.log(`1. Open this URL on a browser you can use:`);
-  console.log(`   ${verificationUrl}`);
+  console.log("1. Run `codex`, choose device auth, and finish approval in the other CLI.");
   console.log("");
-  console.log(`2. Enter this one-time code:`);
-  console.log(`   ${deviceCode.user_code}`);
+  console.log("2. This helper is polling for the code you passed in:");
+  console.log(`   ${userCode}`);
+  console.log("");
+  console.log("Verification URL:");
+  console.log(`   ${verificationUrl}`);
   console.log("");
   console.log("Waiting for approval");
   console.log("");
